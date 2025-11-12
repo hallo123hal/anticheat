@@ -24,10 +24,22 @@ Python-based anti-cheat service for monitoring students during online exams.
 ## Installation
 
 1. Create and activate a virtual environment:
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
+   - **Linux/macOS**:
+     ```bash
+     python3 -m venv venv
+     source venv/bin/activate
+     ```
+   - **Windows (PowerShell)**:
+     ```powershell
+     python -m venv venv
+     .\venv\Scripts\Activate.ps1
+     ```
+   - **Windows (CMD)**:
+     ```cmd
+     python -m venv venv
+     
+.\venv\Scripts\activate
+     ```
 
 2. Install system dependencies for PyAudio:
    - **Linux**:
@@ -51,9 +63,14 @@ pip install -r requirements.txt
 
 ## Running the Service
 
-With the virtual environment activated (`source .venv/bin/activate`):
+With the virtual environment activated:
+- **Linux/macOS**: `source venv/bin/activate`
+- **Windows (PowerShell)**: `.\venv\Scripts\Activate.ps1`
+- **Windows (CMD)**: `venv\Scripts\activate.bat`
+
+Then run:
 ```bash
-  python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8081
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8081
 ```
 
 The service will run on `http://localhost:8081`
@@ -114,6 +131,47 @@ Request:
 
 ### GET /check-violation/{session_id}
 Check violation status for a session.
+
+Response:
+```json
+{
+  "has_violation": true,
+  "message": "Monitoring active. Violations detected."
+}
+```
+
+### GET /violations/{session_id}
+Get all violations for a session.
+
+Response:
+```json
+{
+  "session_id": "session_123",
+  "total_violations": 2,
+  "violations": [
+    {
+      "type": "violation",
+      "violation_type": "eye_gaze",
+      "timestamp": "2024-01-01T00:00:00Z",
+      "message": "Looking away detected for 5.0 seconds",
+      "session_id": "session_123"
+    },
+    {
+      "type": "violation",
+      "violation_type": "voice",
+      "timestamp": "2024-01-01T00:01:00Z",
+      "message": "Human speech detected",
+      "session_id": "session_123"
+    }
+  ],
+  "session_info": {
+    "exam_id": 1,
+    "student_id": 1,
+    "started_at": "2024-01-01T00:00:00Z",
+    "camera_index": 0
+  }
+}
+```
 
 ### GET /health
 Health check endpoint.

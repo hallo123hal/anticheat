@@ -38,6 +38,7 @@ monitoring_sessions: Dict[str, CameraMonitor] = {}
 websocket_connections: Dict[str, Set[WebSocket]] = {}
 session_data: Dict[str, dict] = {}  # Store exam_id, student_id for each session
 violation_queues: Dict[str, queue.Queue] = {}  # Store violation queues for each session
+violations_history: Dict[str, list] = {}  # Store violation history for each session
 def detect_available_cameras(max_index: int = 5) -> Dict[int, bool]:
     """Probe camera indices and return availability map."""
     availability: Dict[int, bool] = {}
@@ -67,11 +68,13 @@ def choose_camera_index(preferred: int | None) -> int | None:
 
 async def process_violation_queue(session_id: str, violation_queue: queue.Queue):
     """Process violation queue and send notifications via WebSocket."""
+    print(f"[DEBUG] Started violation queue processor for session: {session_id}")
     while session_id in monitoring_sessions:
         try:
             # Wait for violation (with timeout to check if session still exists)
             try:
                 violation_type, message = violation_queue.get(timeout=1.0)
+                print(f"[DEBUG] Violation detected in queue: {violation_type} - {message}")
             except queue.Empty:
                 continue
             
@@ -84,22 +87,32 @@ async def process_violation_queue(session_id: str, violation_queue: queue.Queue)
                 session_id=session_id,
             )
             
+            # Store violation in history
+            if session_id not in violations_history:
+                violations_history[session_id] = []
+            violations_history[session_id].append(violation_event.model_dump(mode="json"))
+            print(f"[DEBUG] Violation stored in history. Total violations for session {session_id}: {len(violations_history[session_id])}")
+            
             # Send to all WebSocket connections for this session
-            if session_id in websocket_connections:
+            if session_id in websocket_connections and websocket_connections[session_id]:
                 event_payload = violation_event.model_dump(mode="json")
+                print(f"[DEBUG] Sending violation to {len(websocket_connections[session_id])} WebSocket connection(s)")
                 disconnected = set()
                 for websocket in websocket_connections[session_id]:
                     try:
                         await websocket.send_json(event_payload)
+                        print(f"[DEBUG] Violation sent successfully via WebSocket")
                     except Exception as e:
-                        print(f"Error sending violation to WebSocket: {e}")
+                        print(f"[ERROR] Error sending violation to WebSocket: {e}")
                         disconnected.add(websocket)
                 
                 # Remove disconnected connections
                 websocket_connections[session_id] -= disconnected
+            else:
+                print(f"[WARNING] No WebSocket connections for session {session_id}. Violation not sent: {violation_type} - {message}")
                 
         except Exception as e:
-            print(f"Error processing violation queue: {e}")
+            print(f"[ERROR] Error processing violation queue: {e}")
             break
 
 
@@ -204,6 +217,8 @@ async def stop_monitoring(request: StopMonitoringRequest):
             del session_data[session_id]
         if session_id in violation_queues:
             del violation_queues[session_id]
+        if session_id in violations_history:
+            del violations_history[session_id]
         
         return MonitoringResponse(
             status="stopped",
@@ -223,23 +238,42 @@ async def check_violation(session_id: str):
             message="Session not found or monitoring not started",
         )
     
-    # Note: Actual violation detection is handled asynchronously via callbacks
-    # This endpoint can be used for polling, but violations are sent via WebSocket
+    # Check if there are any violations
+    has_violations = session_id in violations_history and len(violations_history[session_id]) > 0
+    
     return ViolationResponse(
-        has_violation=False,
-        message="Monitoring active. Check WebSocket for violations.",
+        has_violation=has_violations,
+        message=f"Monitoring active. {'Violations detected.' if has_violations else 'No violations yet.'}",
     )
+
+
+@app.get("/violations/{session_id}")
+async def get_violations(session_id: str):
+    """Get all violations for a session."""
+    if session_id not in monitoring_sessions:
+        raise HTTPException(status_code=404, detail="Session not found or monitoring not started")
+    
+    violations = violations_history.get(session_id, [])
+    
+    return {
+        "session_id": session_id,
+        "total_violations": len(violations),
+        "violations": violations,
+        "session_info": session_data.get(session_id, {})
+    }
 
 
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
     """WebSocket endpoint for real-time violation notifications."""
     await websocket.accept()
+    print(f"[DEBUG] WebSocket connection established for session: {session_id}")
     
     # Add to connections set
     if session_id not in websocket_connections:
         websocket_connections[session_id] = set()
     websocket_connections[session_id].add(websocket)
+    print(f"[DEBUG] Total WebSocket connections for session {session_id}: {len(websocket_connections[session_id])}")
     
     try:
         # Send initial connection message
@@ -248,6 +282,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             "session_id": session_id,
             "message": "Connected to anti-cheat monitoring",
         })
+        print(f"[DEBUG] Sent connection confirmation to WebSocket for session {session_id}")
         
         # Keep connection alive and wait for messages
         while True:
@@ -266,15 +301,18 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     "timestamp": datetime.now().isoformat(),
                 })
             except WebSocketDisconnect:
+                print(f"[DEBUG] WebSocket disconnected for session: {session_id}")
                 break
     except Exception as e:
-        print(f"WebSocket error: {e}")
+        print(f"[ERROR] WebSocket error for session {session_id}: {e}")
     finally:
         # Remove from connections set
         if session_id in websocket_connections:
             websocket_connections[session_id].discard(websocket)
+            print(f"[DEBUG] Removed WebSocket connection. Remaining for session {session_id}: {len(websocket_connections[session_id])}")
             if not websocket_connections[session_id]:
                 del websocket_connections[session_id]
+                print(f"[DEBUG] No more WebSocket connections for session {session_id}")
 
 
 @app.get("/health")
@@ -304,8 +342,12 @@ async def shutdown_event():
 def frame_stream_generator(session_id: str):
     """Generate multipart JPEG stream for the specified session."""
     boundary = b"--frame"
+    frame_count = 0
+    print(f"[DEBUG] Starting camera stream for session: {session_id}")
+    
     while True:
         if session_id not in monitoring_sessions:
+            print(f"[DEBUG] Session {session_id} not found, stopping stream")
             break
 
         monitor = monitoring_sessions[session_id]
@@ -315,17 +357,24 @@ def frame_stream_generator(session_id: str):
 
         frame = monitor.get_latest_frame()
         if frame is None:
+            if frame_count == 0:
+                print(f"[DEBUG] No frame available yet for session {session_id}")
             time.sleep(0.05)
             continue
 
-        success, buffer = cv2.imencode(".jpg", frame)
+        success, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not success:
+            print(f"[ERROR] Failed to encode frame for session {session_id}")
             time.sleep(0.05)
             continue
 
         frame_bytes = buffer.tobytes()
+        frame_count += 1
+        if frame_count % 30 == 0:  # Log every 30 frames (~1 second at 30fps)
+            print(f"[DEBUG] Streaming frame {frame_count} for session {session_id} ({len(frame_bytes)} bytes)")
+        
         yield boundary + b"\r\nContent-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
-        time.sleep(0.05)
+        time.sleep(0.033)  # ~30 FPS
 
 
 @app.get("/stream/{session_id}")

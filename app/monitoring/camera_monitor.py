@@ -39,13 +39,16 @@ class CameraMonitor:
     def start_monitoring(self):
         """Start monitoring camera and microphone."""
         if self.is_monitoring:
+            print("[WARNING] Monitoring already started")
             return
 
         try:
             # Open camera
+            print(f"[DEBUG] Attempting to open camera at index {self.camera_index}")
             self.cap = cv2.VideoCapture(self.camera_index)
             if not self.cap.isOpened():
                 # Try default camera
+                print(f"[DEBUG] Camera {self.camera_index} failed, trying index 0")
                 self.cap = cv2.VideoCapture(0)
                 if not self.cap.isOpened():
                     raise Exception(f"Could not open camera. Please ensure camera is connected and accessible.")
@@ -55,11 +58,19 @@ class CameraMonitor:
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             self.cap.set(cv2.CAP_PROP_FPS, self.frame_rate)
             
+            # Verify camera is actually working
+            ret, test_frame = self.cap.read()
+            if not ret or test_frame is None:
+                raise Exception("Camera opened but cannot read frames")
+            
+            print(f"[DEBUG] Camera opened successfully. Frame size: {test_frame.shape}")
+            
             # Start voice monitoring (may fail if microphone is not available)
             try:
                 self.voice_detector.start_monitoring()
+                print("[DEBUG] Voice monitoring started")
             except Exception as mic_error:
-                print(f"Warning: Could not start voice monitoring: {mic_error}")
+                print(f"[WARNING] Could not start voice monitoring: {mic_error}")
                 # Continue without voice detection
             
             # Start camera monitoring thread
@@ -69,9 +80,10 @@ class CameraMonitor:
             self.last_face_detection_time = self.monitor_start_time
             self.monitoring_thread = threading.Thread(target=self._monitor_camera, daemon=True)
             self.monitoring_thread.start()
+            print(f"[DEBUG] Camera monitoring thread started. Grace period: {self.startup_grace_period}s")
             
         except Exception as e:
-            print(f"Error starting camera monitoring: {e}")
+            print(f"[ERROR] Error starting camera monitoring: {e}")
             # Don't raise exception - allow service to continue
             # Camera monitoring may not work, but WebSocket connections will
             self.is_monitoring = False
@@ -111,7 +123,8 @@ class CameraMonitor:
         current_time = time.time()
 
         # Skip violation checks during initial grace period to allow user setup.
-        if current_time - self.monitor_start_time < self.startup_grace_period:
+        grace_remaining = self.startup_grace_period - (current_time - self.monitor_start_time)
+        if grace_remaining > 0:
             self.last_face_detection_time = current_time
             self.last_voice_check_time = current_time
             return
@@ -127,13 +140,12 @@ class CameraMonitor:
                 absence_duration = current_time - self.last_face_detection_time
                 if absence_duration >= self.face_absence_threshold:
                     # Put violation in queue
+                    violation_msg = f"Face not detected for {absence_duration:.1f} seconds"
+                    print(f"[VIOLATION] face_presence: {violation_msg}")
                     try:
-                        self.violation_queue.put_nowait((
-                            "face_presence",
-                            f"Face not detected for {absence_duration:.1f} seconds"
-                        ))
+                        self.violation_queue.put_nowait(("face_presence", violation_msg))
                     except queue.Full:
-                        print("Violation queue is full")
+                        print("[ERROR] Violation queue is full")
                     return
         else:
             self.last_face_detection_time = current_time
@@ -142,10 +154,11 @@ class CameraMonitor:
             is_looking_away, message = self.eye_tracker.is_looking_away(frame)
             if is_looking_away:
                 # Put violation in queue
+                print(f"[VIOLATION] eye_gaze: {message}")
                 try:
                     self.violation_queue.put_nowait(("eye_gaze", message))
                 except queue.Full:
-                    print("Violation queue is full")
+                    print("[ERROR] Violation queue is full")
                 return
         
         # 3. Voice detection (check periodically, not every frame)
@@ -153,10 +166,12 @@ class CameraMonitor:
             self.last_voice_check_time = current_time
             if self.voice_detector.is_human_speech_detected():
                 # Put violation in queue
+                violation_msg = "Human speech detected"
+                print(f"[VIOLATION] voice: {violation_msg}")
                 try:
-                    self.violation_queue.put_nowait(("voice", "Human speech detected"))
+                    self.violation_queue.put_nowait(("voice", violation_msg))
                 except queue.Full:
-                    print("Violation queue is full")
+                    print("[ERROR] Violation queue is full")
                 return
 
     def get_frame(self) -> Optional[np.ndarray]:

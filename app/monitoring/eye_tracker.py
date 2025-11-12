@@ -22,7 +22,9 @@ class EyeTracker:
         self.RIGHT_EYE_INDICES = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
 
         # Looking away threshold (in degrees)
-        self.LOOK_AWAY_THRESHOLD = 30  # degrees
+        # Increased threshold to reduce false positives
+        self.LOOK_AWAY_THRESHOLD = 45  # degrees (yaw - left/right)
+        self.PITCH_THRESHOLD = 35  # degrees (pitch - up/down)
         self.look_away_start_time: Optional[float] = None
         self.LOOK_AWAY_DURATION = 5.0  # seconds
 
@@ -146,22 +148,35 @@ class EyeTracker:
         if pitch is None or yaw is None:
             return False, None
 
-        # Check if looking away (yaw angle indicates left/right looking)
-        is_looking_away = abs(yaw) > self.LOOK_AWAY_THRESHOLD or abs(pitch) > 25
-
+        # Log head pose values for debugging (only occasionally to avoid spam)
         current_time = time.time()
+        if not hasattr(self, '_last_debug_time') or current_time - self._last_debug_time > 2.0:
+            self._last_debug_time = current_time
+            print(f"[DEBUG] Head pose - Yaw: {yaw:.1f}°, Pitch: {pitch:.1f}°, Roll: {roll:.1f}°")
+
+        # Check if looking away (yaw angle indicates left/right looking)
+        # Only trigger if BOTH yaw and pitch exceed thresholds significantly
+        yaw_away = abs(yaw) > self.LOOK_AWAY_THRESHOLD
+        pitch_away = abs(pitch) > self.PITCH_THRESHOLD
+        
+        # More lenient: only consider it "looking away" if yaw is significant
+        # Pitch alone (cúi đầu nhẹ) shouldn't trigger violation
+        is_looking_away = yaw_away or (pitch_away and abs(yaw) > 20)  # Pitch only matters if also turning head
 
         if is_looking_away:
             if self.look_away_start_time is None:
                 self.look_away_start_time = current_time
+                print(f"[DEBUG] Started tracking look away - Yaw: {yaw:.1f}°, Pitch: {pitch:.1f}°")
             else:
                 # Check if looking away for 5+ seconds
                 elapsed = current_time - self.look_away_start_time
                 if elapsed >= self.LOOK_AWAY_DURATION:
                     self.look_away_start_time = None
-                    return True, f"Looking away detected for {elapsed:.1f} seconds"
+                    return True, f"Looking away detected for {elapsed:.1f} seconds (Yaw: {yaw:.1f}°, Pitch: {pitch:.1f}°)"
         else:
             # Reset timer if looking at screen
+            if self.look_away_start_time is not None:
+                print(f"[DEBUG] Reset look away timer - back to normal (Yaw: {yaw:.1f}°, Pitch: {pitch:.1f}°)")
             self.look_away_start_time = None
 
         return False, None
